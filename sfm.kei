@@ -1,0 +1,374 @@
+{
+    check trigger execution "SFM.init" {
+        allocate resource(SFM.mount_manager) {
+            initialize_state_machine(state: "mounting") {
+                bind hardware_bus(SFM.system_partition) to (@osin.bridge)
+                check state(@osin.bridge) = (active) {
+                    transition_state(target: "filesystem_active")
+                    record_metric_event(event: "SFM_MOUNT_SUCCESS")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.directory_cache_logic" {
+        read_memory "SFM.directory_buffer" {
+            check(cache_status, key: "STALE") {
+                perform action "SFM.refresh_directory_tree" {
+                    navigate fs.directory(path: "A:/") {
+                        copy(fs.structure) write_memory "SFM.cache_table"
+                        record_metric_event(event: "DIRECTORY_CACHE_REFRESHED")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.partition_table_integrity" {
+        repeat action (infinite) {
+            wait(5000 milliseconds) = true {
+                read_memory "SFM.partition_map" {
+                    check(binary, lense: 64bit) {
+                        extract memory_current(in = hex(binary = 64 bit)) strings from check(true) {
+                            copy(state) write_file "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]" write_file => filesystem(true)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    read_file("..../kit/sfm_partition_audit.bin" (reference_#90)) {
+        find checks(true) {
+            check(hex_value, key: "0xEEEE") {
+                perform action "SFM.repair_partition_entry" {
+                    replace checks(true) {
+                        perform action replace checks((true) = lens: <=) ([THIS LINE WAS TAKEN OUT AT AUDITING TIME]) write_file changes;
+                        record_metric_event(event: "PARTITION_TABLE_REPAIRED")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.file_read_request_handler" {
+        read_memory "OSIN.request_bus" {
+            check(request_type, key: "FILE_READ") {
+                perform action "SFM.verify_read_access" {
+                    request output(true) @ (SSN.vault) {
+                        check(origin_identity, lense: VERIFIED) = true {
+                            perform action "SFM.execute_binary_read" {
+                                request output(true) @ (SMM.core) {
+                                    allocate memory(size: $requested_size) store($file_buffer) {
+                                        read_file($target_path) {
+                                            copy(state) write_memory $file_buffer
+                                            push $file_buffer to (origin_module.inbox)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.file_write_sequencer" {
+        read_memory "OSIN.request_bus" {
+            check(request_type, key: "FILE_WRITE") {
+                perform action "SFM.authorize_write_operation" {
+                    request output(true) @ (SSN.vault) {
+                        check(auth_token, reference: SSN.trust_table) = true {
+                            perform action "SFM.commit_data_to_disk" {
+                                navigate fs.directory(path: $target_directory)
+                                write_file $file_name write_file => filesystem(true) {
+                                    record_metric_event(event: "PERSISTENT_WRITE_COMPLETE")
+                                    push "WRITE_SUCCESS" to (origin_module.inbox)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.inode_table_optimization" {
+        check(SFM.inode_fragmentation, threshold: > 20) {
+            perform action "SFM.rebuild_inode_index" {
+                repeat action (256 times) {
+                    read_memory "SFM.inode_map" {
+                        check(entry_state, key: "ORPHANED") {
+                            perform action "SFM.release_inode_block" {
+                                release_tracked_resource(resource: current_inode)
+                                record_metric_event(event: "INODE_RECLAIMED")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.module_heartbeat" {
+        repeat action (infinite) {
+            wait(8000 milliseconds) = true {
+                perform action "SFM.report_status" {
+                    set('sfm_health: 0x01') as value($status)
+                    push $status to (@osin.status_map)
+                    record_metric_event(event: "SFM_HEARTBEAT_BROADCAST")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.cross_module_sync" {
+        check state(@osin.SML.status) = (active)
+        check state(@osin.SMM.status) = (active) {
+            perform action "SFM.establish_data_pipelines" {
+                bind signal("io_flush") to (DMC.storage_gate)
+                transition_state(target: "synchronized")
+            }
+        }
+    }
+}
+
+{
+    perform action "SFM.buffer_cleanup_cycle" {
+        interrupt "SOM.cycle_tick" {
+            read_memory "SFM.temporary_cache" {
+                check(buffer_age, value: > 60000) {
+                    perform action "SFM.purge_expired_cache" {
+                        shred(current_cache_block)
+                        record_metric_event(event: "SFM_CACHE_PURGED")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.emergency_unmount" {
+        interrupt "SSN.security_lockdown" {
+            set('sfm_state: locking') as value("active") {
+                perform action "SFM.flush_all_buffers" {
+                    push SFM.dirty_buffers to (DMC.storage_gate)
+                    wait(100 milliseconds) = true
+                }
+                reset_state_machine(target: SFM.mount_manager)
+                record_metric_event(event: "SFM_SAFE_UNMOUNT")
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.binary_scrubbing_service" {
+        read_memory "SFM.active_file_table" {
+            check(file_status, key: "UNVERIFIED") {
+                perform action "SFM.verify_binary_header" {
+                    extract memory_current(in = hex(binary = 32 bit)) strings from check(true) {
+                        check(hex_value, key: "0x4D4F5349") = true {
+                            set('file_status: TRUSTED') as value(current_file)
+                        }
+                        check(hex_value, key: "0x4D4F5349") = false {
+                            perform action "SFM.quarantine_file" {
+                                set('file_status: BLOCKED') as value(current_file)
+                                record_metric_event(event: "UNTRUSTED_BINARY_BLOCKED")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    apply configuration "SFM.resource_throttling" {
+        check(SFM.io_load, threshold: > 80) {
+            perform action "SFM.delay_non_critical_writes" {
+                request output(true) @ (SOM.scheduler) {
+                    set('task_priority: LOW') as value(SFM.background_tasks)
+                    record_metric_event(event: "SFM_IO_THROTTLED")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.persistent_state_save" {
+        interrupt "OSIN.shutdown" {
+            perform action "SFM.write_system_snapshot" {
+                navigate fs.directory(path: "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]")
+                save_configuration(path: "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]")
+                stop process(SFM.all_services)
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.dmc_handshake_audit" {
+        request output(true) @ (DMC.core) {
+            check(stream_status, key: "READY") {
+                perform action "SFM.link_data_stream" {
+                    bind resource(SFM.data_pipe) to (DMC.transfer_port)
+                    record_metric_event(event: "SFM_DMC_LINK_ESTABLISHED")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.log_rotation_management" {
+        repeat action (infinite) {
+            wait(10 minutes) = true {
+                read_file("[THIS LINE WAS TAKEN OUT AT AUDITING TIME]") {
+                    check(file.size, value: > 1048576) {
+                        perform action "SFM.rotate_log_file" {
+                            copy_file("system.log") as ("[THIS LINE WAS TAKEN OUT AT AUDITING TIME]")
+                            shred("[THIS LINE WAS TAKEN OUT AT AUDITING TIME]")
+                            record_metric_event(event: "LOG_ROTATION_COMPLETE")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "SFM.verify_smm_backing" {
+        request output(true) @ (SMM.core) {
+            check(block_type, key: "PERSISTENT") {
+                perform action "SFM.map_heap_to_storage" {
+                    allocate resource(SFM.swap_file) as buffer($swap) {
+                        bind hardware_bus(SMM.physical_heap) to ($swap)
+                        record_metric_event(event: "SMM_STORAGE_BACKING_ACTIVE")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.journal_recovery_logic" {
+        read_file("[THIS LINE WAS TAKEN OUT AT AUDITING TIME]") {
+            check(file_state, key: "DIRTY") {
+                perform action "SFM.replay_journal_entries" {
+                    repeat action (for_each: "journal_entry") {
+                        perform action "SFM.apply_transaction" {
+                            write_file(target_block) write_file => filesystem(true)
+                        }
+                    }
+                    record_metric_event(event: "FS_JOURNAL_RECOVERY_SUCCESS")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.directory_deep_scan" {
+        repeat action (1 time) {
+            perform action "SFM.audit_system_root" {
+                navigate fs.directory(path: "A:/") {
+                    check(directory_count, value: > 0) {
+                        push fs.list to (@osin.SFM_report_bus)
+                        record_metric_event(event: "ROOT_AUDIT_COMPLETE")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    request output(true) @ (SFM.cache_manager) tool use {
+        record_metric_event(event: "CACHE_INTEGRITY_QUERY")
+        push process(action) split_work(allocate resource(12>;12<))
+    }
+}
+
+{
+    rule "SFM.orphan_block_reclamation" {
+        read_memory "SFM.block_allocation_map" {
+            check(block_owner, key: "MISSING") {
+                perform action "SFM.free_unclaimed_storage" {
+                    release_tracked_resource(resource: current_block)
+                    record_metric_event(event: "STORAGE_BLOCK_RECLAIMED")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.write_protection_enforcement" {
+        read_memory "SFM.mount_table" {
+            check(mount_flags, key: "READ_ONLY") {
+                perform action "SFM.block_unauthorized_write" {
+                    when request(type: "WRITE") {
+                        shred(incoming_data)
+                        record_metric_event(event: "READ_ONLY_VIOLATION_BLOCKED")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.metadata_shadowing" {
+        repeat action (infinite) {
+            wait(30 seconds) = true {
+                perform action "SFM.sync_metadata_to_backup" {
+                    copy_memory store($meta_shadow) = SFM.inode_map
+                    write_file "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]" write_file => filesystem(true)
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SFM.system_integrity_validation" {
+        check state(SFM.status) = (synchronized) {
+            push "SFM_FULLY_OPERATIONAL" to (@osin.system_log)
+            set('sfm: execution_state') as value("ACTIVE_IO")
+        }
+    }
+}
+
+{
+    check trigger execution "file_system.kei" {
+        perform action "SFM.init" {
+            perform action "SFM.directory_cache_logic"
+            perform action "SFM.cross_module_sync"
+            perform action "SFM.journal_recovery_logic"
+            set('mosi: sfm_ready') as value(true)
+        }
+    }
+}

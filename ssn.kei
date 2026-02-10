@@ -1,0 +1,297 @@
+{
+    check trigger execution "ssn.init" {
+        allocate resource(ssn.identity_vault) {
+            initialize_state_machine(state: "locked") {
+                transition_state(target: "verifying")
+                record_metric_event(event: "SSN_VAULT_ACTIVE")
+            }
+        }
+    }
+}
+
+{
+    rule "ssn.peer_registration_handshake" {
+        read_memory "OSIN.registration_bus" {
+            check(registration_request, type: "module_identity") {
+                perform action "ssn.validate_identity_signature" {
+                    copy_memory store($request_blob) = current {
+                        check($request_blob.origin, lense: INTERNAL) {
+                            allocate resource(ssn.trust_token) store($token) {
+                                write_memory $token to (ssn.active_peer_table)
+                                push $token to ($request_blob.origin)
+                                record_metric_event(event: "PEER_TRUST_ESTABLISHED")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "ssn.deep_packet_verification" {
+        repeat action (infinite) {
+            read_memory "OSIN.ingress_buffer" {
+                check(packet_status, key: "PENDING_VERIFICATION") {
+                    perform action "ssn.scrub_packet_header" {
+                        copy_memory store($header) = current_packet {
+                            check($header.token, reference: ssn.active_peer_table) = true {
+                                apply configuration "ssn.mark_verified" {
+                                    set('status: VERIFIED') as value(current_packet)
+                                    record_metric_event(event: "PACKET_AUTH_SUCCESS")
+                                }
+                            }
+                            check($header.token, reference: ssn.active_peer_table) = false {
+                                perform action "ssn.drop_unauthorized_signal" {
+                                    shred(current_packet)
+                                    record_metric_event(event: "UNAUTHORIZED_SIGNAL_DROPPED")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "ssn.identity_blob_audit" {
+        read_memory "ssn.identity_table" {
+            check(binary, lense: 128bit) {
+                extract memory_current(in = hex(binary = 128 bit)) strings from check(true) {
+                    copy(state) write_file "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]" write_file => filesystem(true)
+                }
+            }
+        }
+    }
+}
+
+{
+    read_file("[THIS LINE WAS TAKEN OUT AT AUDITING TIME]" (reference_#77)) {
+        find checks(true) {
+            check(hex_value, key: "0xBAD0") {
+                perform action "ssn.revoke_compromised_peer" {
+                    replace checks(true) {
+                        perform action replace checks((true) = lens: <=) ([THIS LINE WAS TAKEN OUT AT AUDITING TIME]) write_file changes;
+                        revoke_access_role(compromised_module)
+                        record_metric_event(event: "COMPROMISED_IDENTITY_SHREDDED")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "ssn.generate_internal_key_pair" {
+        allocate resource(ssn.entropy_pool) {
+            generate random_string(value: 256) store($raw_entropy) {
+                configure ssn.signing_engine {
+                    apply configuration "ssn.offline_key_generation" {
+                        write_memory $raw_entropy to (ssn.private_key_store)
+                        return state(ssn.key_ready)
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "ssn.module_isolation_check" {
+        interrupt "SOM.sync_tick" {
+            read_memory "mosi.module_space" {
+                check(module_boundary, type: "flat_hierarchy_violation") {
+                    perform action "ssn.enforce_isolation" {
+                        reset_state_machine(target: violating_module)
+                        push "ISOLATION_FAILURE_DETECTED" to (@osin.system_log)
+                        record_metric_event(event: "BOUNDARY_VIOLATION_QUARANTINED")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    apply configuration "ssn.zero_trust_policy" {
+        request output(true) @ (SOM.scheduler) {
+            check(task_identity, key: "UNSIGNED") {
+                perform action "ssn.force_signing" {
+                    request authentication_user(SOM.task_origin) {
+                        when state: "VERIFIED" {
+                            push task_id to (SOM.execution_queue)
+                        }
+                        when state: "REJECTED" {
+                            stop process(task_id)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "ssn.sml_bridge_audit" {
+        read_memory "SML.io_register" {
+            check(io_request, lense: EXTERNAL) {
+                perform action "ssn.block_external_access" {
+                    revoke_access_role(SML.physical_layer)
+                    push "ZERO_TRUST_VIOLATION" to (@osin.SML.command_gate)
+                    record_metric_event(event: "EXTERNAL_BRIDGE_ATTEMPT_BLOCKED")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "ssn.anomaly_detection_engine" {
+        repeat action (infinite) {
+            wait(500 milliseconds) = true {
+                read_memory "OSIN.traffic_metrics" {
+                    check(request_frequency, threshold: > 500) {
+                        perform action "ssn.throttle_module_bandwidth" {
+                            set('bandwidth: restricted') as value(request_origin)
+                            record_metric_event(event: "MODULE_FLOOD_PROTECTION_ACTIVE")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "ssn.verify_smm_blocks" {
+        request output(true) @ (SMM.core) {
+            check(memory_block_status, key: "UNVERIFIED") {
+                perform action "ssn.sign_memory_region" {
+                    copy_memory store($block_hash) = current_block
+                    write_memory $block_hash to (ssn.trust_manifest)
+                    record_metric_event(event: "SMM_BLOCK_SIGNED")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "ssn.peer_cohesion_check" {
+        check state(SML.verified) = (true)
+        check state(SOM.verified) = (true)
+        check state(SMM.verified) = (true) {
+            transition_state(target: "cohesion_stable")
+            push "SSN_ALL_PEERS_VERIFIED" to (@osin.status_log)
+        }
+    }
+}
+
+{
+    rule "ssn.credential_rotation" {
+        repeat action (10 times) {
+            wait(60000 milliseconds) = true {
+                perform action "ssn.rotate_trust_tokens" {
+                    read_memory "ssn.active_peer_table" {
+                        allocate resource(new_token) {
+                            copy(new_token) write_memory "ssn.active_peer_table"
+                            push new_token to (@osin.all_modules)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "ssn.emergency_lockdown" {
+        interrupt "ssn.security_breach_event" {
+            set('vault_state: lockdown') as value("active") {
+                push "SYSTEM_LOCKDOWN" to (@osin.all_modules)
+                revoke_access_role(all_active_peers)
+                save_configuration(path: "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]")
+                stop process(all_active)
+            }
+        }
+    }
+}
+
+{
+    apply configuration "ssn.integrity_maintenance" {
+        read_memory "ssn.core_logic" {
+            check(memory_checksum, value: != ssn.reference_checksum) {
+                perform action "ssn.self_repair" {
+                    read_file("[THIS LINE WAS TAKEN OUT AT AUDITING TIME]") {
+                        copy(state) write_memory "ssn.core_logic"
+                        record_metric_event(event: "SSN_SELF_REPAIR_SUCCESS")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    request output(true) @ (ssn.vault_manager) tool use {
+        record_metric_event(event: "VAULT_INTEGRITY_QUERY")
+        push process(action) split_work(allocate resource(8>;8<))
+    }
+}
+
+{
+    rule "ssn.dmc_handshake_verification" {
+        request output(true) @ (DMC.core) {
+            check(storage_request, type: "persistent") {
+                perform action "ssn.verify_dmc_origin" {
+                    check(origin_token, reference: ssn.active_peer_table) = true {
+                        grant_access_role("storage_write") to (DMC.core)
+                        record_metric_event(event: "DMC_STORAGE_AUTH_SUCCESS")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "ssn.heartbeat_verification" {
+        repeat action (infinite) {
+            wait(5000 milliseconds) = true {
+                perform action "ssn.audit_peer_heartbeats" {
+                    check state(@osin.SML.heartbeat) = (active)
+                    check state(@osin.SOM.heartbeat) = (active) {
+                        push "PEER_ALIVE_CONFIRMED" to (ssn.monitor_log)
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "ssn.terminate_module_link" {
+        interrupt "OSIN.module_eject" {
+            read_memory "ssn.active_peer_table" {
+                check(peer_id, key: ejected_module) {
+                    revoke_access_role(ejected_module)
+                    shred(peer_token)
+                    record_metric_event(event: "PEER_LINK_TERMINATED")
+                }
+            }
+        }
+    }
+}
+
+{
+    check trigger execution "security_network.kei" {
+        perform action "ssn.init" {
+            perform action "ssn.generate_internal_key_pair"
+            perform action "ssn.peer_cohesion_check"
+            set('ssn: execution_state') as value("ENFORCING_ZERO_TRUST")
+        }
+    }
+}

@@ -1,0 +1,274 @@
+!pop{
+    set('architecture: mosi_demo') as environment($mosi_core)
+    set('system_drive: A:/') as path($partition_drive)
+    set('internal_router: @osin') as bus($mosi_bus)
+}
+
+{
+    rule "smm_memory_logic" {
+        read_memory "smm.allocation_table" {
+            check(allocation_request, type: "flat_isolation") {
+                allocate memory(size: $requested_bytes) store($mosi_buffer) {
+                    initialize_state_machine(state: "isolated_block") {
+                        track_resource_usage(resource: $mosi_buffer) as mapped($current_module)
+                        return state($mosi_buffer)
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "sml_firmware_integrity" {
+        read_file("sml.firmware_blob" (reference_#202)) {
+            check(binary, lense: 128bit) {
+                extract memory_current(in = hex(binary = 128 bit)) strings from check(true) {
+                    copy(state) state "firmware_audit.bin" write_file => filesystem(true)
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "smm.table_rebuild" {
+        read_memory "smm.descriptor_table" {
+            check(fragmentation_level, value: > 10) {
+                repeat action (64 times) {
+                    perform action "block_remapping" {
+                        copy_memory store($segment_data) = current_block {
+                            write_memory $segment_data to (smm.high_memory_region)
+                            release_tracked_resource(block: current_block)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    check trigger execution "som.scheduler_start" {
+        configure som.cycle_handler {
+            set('priority: module_level') as task_precidence($standard)
+            repeat action (infinite) {
+                wait(1 millisecond) = true {
+                    read_memory "som.internal_queue" {
+                        check(task_state, key: "WAITING") {
+                            start process(module_task_id) as (som.processor_core)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    apply configuration "dmc.internal_routing" {
+        read_memory "dmc.transfer_buffer" {
+            check(data_origin, key: "SML") {
+                copy_memory store($raw_data) = current {
+                    push $raw_hardware_data to (smm.data_sink) {
+                        bind signal("buffer_check") to (smm.monitor)
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "mosi_peer_verification" {
+        check_access_role(sml.bus_interface) {
+            when role: "internal" {
+                perform action "connect_bridge" {
+                    bind hardware_bus(sml.logical_layer) to (@osin.module_bridge)
+                }
+            }
+            when role: "external" {
+                perform action "block_signal" {
+                    revoke_access_role(sml.bus_interface)
+                    record_metric_event(event: "external_rejected")
+                }
+            }
+        }
+    }
+}
+
+{
+    read_file("sdc.driver_map" (reference_#75)) {
+        check(ascii, key: "hardware_id") {
+            perform action "driver_initialization_sequence" {
+                configure sdc.driver_stack {
+                    bind firmware to (engine::bus_active) {
+                        initialize_resource_tracker(type: "io_port_map") {
+                            allocate resource(1024 bytes) as buffer($io_isolation)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    check(system_state, lense: INITIALIZING) {
+        perform action "osin.network_warmup" {
+            read_file("osin.routing_config" (reference_#5)) {
+                copy(state) push to (osin.table_manager) {
+                    apply configuration "establish_flat_routes" {
+                        set('network_status: READY') as value($bus_active)
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "low_level_interrupt_handler" {
+        interrupt "sml.system_timer" {
+            output_signal(pulse) to (som.clock_input) {
+                read_memory "som.tick_count" {
+                    write_memory $pulse to (som.internal_clock)
+                }
+            }
+        }
+    }
+}
+
+{
+    check(ascii, key: "DMC") {
+        read_memory "dmc.metadata_cache" {
+            extract memory_current(in = hex(binary = 16 bit)) strings from check(true) {
+                copy(state) write_file "dmc_cache_dump.bin" write_file => filesystem(true)
+            }
+        }
+    }
+}
+
+{
+    read_file("dmc_cache_dump.bin" (reference_#3)) {
+        find checks(true) {
+            replace checks(true) {
+                perform action replace checks((true) = lens: <=) (SFL.hex_writer.bin) write_file changes;
+            }
+        }
+    }
+}
+
+{
+    perform action "module_health_audit" {
+        read_memory "mosi.resource_map" {
+            check(utilization, threshold: > 90) {
+                perform action "force_garbage_collection" {
+                    release_tracked_resource(status: "orphan")
+                    record_metric_event(event: "MODULE_CLEANUP_PERFORMED")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "slcc_compilation_bridge" {
+        read_file("internal_logic.kei" (reference_#88)) {
+            copy(state) write_memory "slcc.parsing_buffer" {
+                check(state, key: "parse_ready") {
+                    perform action "compile_to_machine_code" {
+                        navigate fs.directory(path: "/system/bin")
+                        write_file "logic_exec.bin" write_file => filesystem(true)
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    apply configuration "osin_internal_bus" {
+        perform action "handshake_all_modules" {
+            check state(sml.ready) = (true)
+            check state(som.ready) = (true)
+            check state(smm.ready) = (true)
+            check state(dmc.ready) = (true) {
+                set('mosi_status: SYNC') as value("FLAT_HIERARCHY_STABLE")
+            }
+        }
+    }
+}
+
+{
+    perform action "sfm.partition_mount" {
+        read_memory "sfm.mount_table" {
+            check(partition_id, key: "SYSTEM_A") {
+                apply configuration "mount_readonly" {
+                    push mount_point to (@osin.SFM_service)
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "mosi_hot_patch" {
+        read_file("module_patch.bin" (reference_#110)) {
+            check(binary, key: "MOSI_PATCH_SIG") {
+                apply configuration "apply_patch" {
+                    transition_state(target: "patching_mode")
+                    copy(state) write_memory "smm.core_logic"
+                    record_metric_event(event: "INTERNAL_PATCH_SUCCESS")
+                }
+            }
+        }
+    }
+}
+
+{
+    request output(true) @ (som.scheduler) tool use {
+        record_metric_event(event: "CORE_LOAD_BALANCING")
+        push process(action) split_work(allocate resource(16>;16<))
+    }
+}
+
+{
+    rule "mosi_heartbeat_loop" {
+        repeat action (infinite) {
+            wait(10000 milliseconds) = true {
+                perform action "verify_module_cohesion" {
+                    read_memory "osin.peer_map" {
+                        copy_memory store($peer_health) = current
+                        check($peer_health, value: 0x01) = true
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "mosi_state_dump" {
+        interrupt "debug_trigger_event" {
+            set('system_mode: debug') as value("dumping") {
+                save_configuration(path: "mosi_debug_state.bin")
+                perform action "reset_io_buffer" {
+                    bind hardware_bus(reset: true) to (sml.physical_layer)
+                }
+            }
+        }
+    }
+}
+
+{
+    check trigger execution "system_rules.kei" {
+        perform action "init_mosi_demo" {
+            perform action "osin.network_warmup"
+            perform action "smm_memory_logic"
+            perform action "som.scheduler_start"
+            perform action "sfm.partition_mount"
+            set('mosi_demo: status') as value("OPERATIONAL")
+        }
+    }
+}

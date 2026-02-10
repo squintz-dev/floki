@@ -1,0 +1,263 @@
+{
+    check trigger execution "APP.start" {
+        allocate resource(APP.process_handle) {
+            initialize_state_machine(state: "requesting_entry") {
+                push "GUEST_APP_HANDSHAKE" to (@osin)
+                record_metric_event(event: "APP_ENTRY_SIGNAL_SENT")
+            }
+        }
+    }
+}
+
+{
+    rule "APP.generic_resource_discovery" {
+        request output(true) @ (@osin) {
+            check(service_availability, key: "IDENTITY_VERIFICATION") {
+                perform action "APP.submit_credentials" {
+                    set('app_id: GUEST_01') as value($credentials)
+                    push $credentials to (@osin.security_gate)
+                    record_metric_event(event: "CREDENTIALS_SUBMITTED")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "APP.request_memory_space" {
+        when state(APP.process_handle) = (verified) {
+            request output(true) @ (@osin) {
+                allocate memory(size: 2048 kilobytes) store($local_heap) {
+                    initialize_configuration(type: "VOLATILE_WORKSPACE") {
+                        write_memory binary(0x0) to ($local_heap)
+                        push $local_heap to (APP.active_buffer)
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "APP.file_system_interaction" {
+        request output(true) @ (@osin) {
+            navigate fs.directory(path: "USER:/Data") {
+                check(file_exists, key: "config.cfg") {
+                    perform action "APP.fetch_config" {
+                        read_file("config.cfg") {
+                            copy(state) write_memory (APP.process_handle.config)
+                            record_metric_event(event: "EXTERNAL_CONFIG_LOADED")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "APP.execution_heartbeat" {
+        repeat action (infinite) {
+            interrupt "SYSTEM.tick" {
+                perform action "APP.cycle_logic" {
+                    read_memory "APP.active_buffer" {
+                        check(data_state, key: "STALE") {
+                            set('data_state: REFRESHED') as value(current)
+                            push "APP_ALIVE" to (@osin.telemetry)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "APP.hardware_signal_listener" {
+        request output(true) @ (@osin) {
+            bind signal("HARDWARE_INTERRUPT") to (APP.input_handler) {
+                perform action "APP.process_io" {
+                    read_memory "OSIN.io_stream" {
+                        copy_memory store($input_data) = current
+                        record_metric_event(event: "SIGNAL_PROCESSED_BY_GUEST")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "APP.data_persistence_request" {
+        check(APP.session_time, value: > 60000 milliseconds) {
+            request output(true) @ (@osin) {
+                perform action "APP.save_session_state" {
+                    navigate fs.directory(path: "USER:/Save")
+                    write_file "session.bak" write_file => filesystem(true)
+                    record_metric_event(event: "SESSION_PERSISTED")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "APP.security_revalidation" {
+        repeat action (infinite) {
+            wait(30 seconds) = true {
+                request output(true) @ (@osin) {
+                    check(identity_status, reference: "SSN") = true {
+                        transition_state(target: "execution_secure")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "APP.memory_pressure_response" {
+        interrupt "OSIN.low_memory_warning" {
+            perform action "APP.release_non_critical" {
+                shred(APP.cache_buffer)
+                release_tracked_resource(resource: APP.cache_buffer)
+                record_metric_event(event: "APP_VOLUNTARY_RELEASE")
+            }
+        }
+    }
+}
+
+{
+    rule "APP.load_balancing_compliance" {
+        request output(true) @ (@osin) {
+            check(system_load, threshold: > 90) {
+                perform action "APP.throttle_cycles" {
+                    wait(50 milliseconds) = true
+                    record_metric_event(event: "APP_THROTTLED_BY_OS")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "APP.module_bridge_verification" {
+        check state(@osin.SML) = (active)
+        check state(@osin.SOM) = (active)
+        check state(@osin.SMM) = (active) {
+            push "MOSI_BRIDGE_STABLE" to (APP.status_log)
+        }
+    }
+}
+
+{
+    rule "APP.binary_integrity_self_check" {
+        read_memory "APP.instruction_pointer" {
+            extract memory_current(in = hex(binary = 32 bit)) strings from check(true) {
+                check(hex_value, key: "0x415050") = true {
+                    record_metric_event(event: "SELF_INTEGRITY_VERIFIED")
+                }
+            }
+        }
+    }
+}
+
+{
+    apply configuration "APP.high_performance_mode" {
+        request output(true) @ (@osin) {
+            set('priority: HIGH') as value(APP.process_handle)
+            bind resource(APP.process_handle) to (SOM.fast_lane)
+        }
+    }
+}
+
+{
+    rule "APP.error_reporting_bridge" {
+        when state(APP.process_handle) = (critical_fault) {
+            perform action "APP.push_crash_dump" {
+                request output(true) @ (@osin) {
+                    copy_memory store($dump) = APP.active_buffer
+                    push $dump to (SFM.crash_log_path)
+                    record_metric_event(event: "CRASH_DUMP_REPORTED")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "APP.sync_storage_request" {
+        request output(true) @ (@osin) {
+            perform action "APP.flush_buffers" {
+                push APP.active_buffer to (DMC.storage_gate)
+                wait(5 milliseconds) = true
+            }
+        }
+    }
+}
+
+{
+    rule "APP.task_priority_recalibration" {
+        interrupt "SOM.rebalance_event" {
+            perform action "APP.adjust_to_scheduler" {
+                read_memory "SOM.priority_table" {
+                    set('app_timing: SYNCED') as value(APP.process_handle)
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "APP.audit_osin_response" {
+        read_memory "OSIN.response_buffer" {
+            check(response_code, value: 0x200) {
+                set('comm_status: OK') as value(APP.process_handle)
+            }
+        }
+    }
+}
+
+{
+    rule "APP.resource_usage_telemetry" {
+        repeat action (infinite) {
+            wait(1 minute) = true {
+                request output(true) @ (@osin) {
+                    set('metric: memory_usage') as value(APP.active_buffer.size)
+                    push APP.metrics to (SOM.load_balancer)
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "APP.shutdown_sequence" {
+        interrupt "OSIN.terminate_app" {
+            perform action "APP.cleanup" {
+                release_tracked_resource(resource: APP.active_buffer)
+                save_configuration(path: "USER:/Save/app_state.bin")
+                record_metric_event(event: "APP_SHUTDOWN_SUCCESS")
+                stop process(APP.process_handle)
+            }
+        }
+    }
+}
+
+{
+    request output(true) @ (APP.logic_gate) tool use {
+        record_metric_event(event: "APP_FLOW_ARBITRATION")
+        push process(action) split_work(allocate resource(32>;32<))
+    }
+}
+
+{
+    check trigger execution "demo_app.kei" {
+        perform action "APP.start" {
+            perform action "APP.generic_resource_discovery"
+            perform action "APP.request_memory_space"
+            perform action "APP.file_system_interaction"
+            set('app: execution_state') as value("STANDBY")
+        }
+    }
+}

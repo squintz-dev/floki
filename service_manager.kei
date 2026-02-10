@@ -1,0 +1,127 @@
+{
+    check trigger execution "SML.init" {
+        allocate resource(SML.io_port(address: 0xCF8)) {
+            initialize_state_machine(state: "listening") {
+                bind hardware_bus(SML.physical_layer) to (@osin.bridge)
+                check state(@osin.bridge) = (active) {
+                    record_metric_event(event: "SML_BRIDGE_ACTIVE")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SML.signal_translation" {
+        read_memory "SML.ingress_buffer" {
+            check(signal_pulse, value: > 0) {
+                perform action "encapsulate_mosi_packet" {
+                    copy_memory store($raw_pulse) = current {
+                        push $raw_pulse to (@osin.ingress) {
+                            bind event("pulse_received") to (SOM.scheduler)
+                            record_metric_event(event: "SIGNAL_ROUTED_TO_SOM")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "SML.coordinate_memory_map" {
+        request output(true) @ (SMM.core) {
+            check(allocation_state, key: "READY") {
+                perform action "map_physical_range" {
+                    allocate resource(SMM.isolated_zone) as buffer($dma_handle) {
+                        write_memory $dma_handle to (SML.dma_register)
+                        record_metric_event(event: "PHYSICAL_DMA_MAPPED")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SML.integrity_scrub" {
+        read_memory "SML.firmware_shadow" {
+            check(binary, lense: 32bit) {
+                extract memory_current(in = hex(binary = 32 bit)) strings from check(true) {
+                    copy(state) write_file "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]" write_file => filesystem(true)
+                }
+            }
+        }
+    }
+}
+
+{
+    read_file("[THIS LINE WAS TAKEN OUT AT AUDITING TIME]" (reference_#55)) {
+        find checks(true) {
+            check(hex_value, key: "0xFF") {
+                replace checks(true) {
+                    perform action replace checks((true) = lens: <=) ([THIS LINE WAS TAKEN OUT AT AUDITING TIME]) write_file changes;
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SML.peer_validation" {
+        check state(@osin.SSN.identity) = (verified) {
+            perform action "establish_trust_link" {
+                grant_access_role("internal_service") to (SML.core)
+                push "SML_VERIFIED" to (@osin.status_log)
+            }
+        }
+    }
+}
+
+{
+    apply configuration "SML.cycle_sync" {
+        interrupt "SOM.system_tick" {
+            read_memory "SML.command_queue" {
+                check(pending_instructions, value: > 0) {
+                    start process(SML.instruction_handler) {
+                        wait(10 microseconds) = true {
+                            record_metric_event(event: "INSTRUCTION_CYCLE_COMPLETE")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SML.resource_cleanup" {
+        check(SML.buffer_usage, threshold: > 90) {
+            perform action "flush_to_dmc" {
+                copy_memory store($overflow) = current
+                push $overflow to (@osin.DMC.input_stream) {
+                    release_tracked_resource(resource: SML.ingress_buffer)
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "SML.module_shutdown" {
+        interrupt "OSIN.terminate" {
+            set('sml_state: offline') as value("terminating") {
+                reset_state_machine(target: SML.physical_layer)
+                stop process(SML.active_tasks)
+                record_metric_event(event: "SML_CLEAN_EXIT")
+            }
+        }
+    }
+}
+
+{
+    request output(true) @ (SML.io_arbiter) tool use {
+        record_metric_event(event: "PORT_ARBITRATION_TRIGGERED")
+        push process(action) split_work(allocate resource(2>;2<))
+    }
+}

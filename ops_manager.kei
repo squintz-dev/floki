@@ -1,0 +1,143 @@
+{
+    check trigger execution "SOM.init" {
+        allocate resource(SOM.scheduler_core) {
+            initialize_state_machine(state: "idle") {
+                transition_state(target: "sequencing")
+                record_metric_event(event: "SOM_SCHEDULER_ONLINE")
+            }
+        }
+    }
+}
+
+{
+    rule "SOM.system_heartbeat" {
+        repeat action (infinite) {
+            wait(1 millisecond) = true {
+                perform action "SOM.broadcast_tick" {
+                    set('pulse: system_sync') as value($tick)
+                    push $tick to (@osin.all_modules) {
+                        bind event("cycle_update") to (SML.internal_clock)
+                        bind event("cycle_update") to (SMM.logic_engine)
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SOM.task_arbitration" {
+        read_memory "SOM.task_queue" {
+            check(task_count, value: > 0) {
+                perform action "SOM.prioritize_execution" {
+                    check(task_type, key: "INTERRUPT") {
+                        start process(current_task) as (SOM.high_priority_lane)
+                        record_metric_event(event: "INTERRUPT_TASK_EXECUTED")
+                    }
+                    check(task_type, key: "STANDARD") {
+                        start process(current_task) as (SOM.module_lane)
+                        record_metric_event(event: "STANDARD_TASK_EXECUTED")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "SOM.coordinate_task_memory" {
+        request output(true) @ (SMM.core) {
+            check(memory_availability, value: true) {
+                allocate memory(size: 4096 bytes) store($task_workspace) {
+                    track_resource_usage(resource: $task_workspace) as isolated($active_process)
+                    push $task_workspace to (SOM.active_context)
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SOM.scheduler_integrity_audit" {
+        read_memory "SOM.instruction_pointer_shadow" {
+            check(binary, lense: 32bit) {
+                extract memory_current(in = hex(binary = 32 bit)) strings from check(true) {
+                    copy(state) write_file "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]" write_file => filesystem(true)
+                }
+            }
+        }
+    }
+}
+
+{
+    read_file("..../kit/som_audit.bin" (reference_#66)) {
+        find checks(true) {
+            check(hex_value, key: "0x00") {
+                replace checks(true) {
+                    perform action replace checks((true) = lens: <=) (..../kit/som_patch.bin) write_file changes;
+                    record_metric_event(event: "SCHEDULER_LOGIC_REPAIRED")
+                }
+            }
+        }
+    }
+}
+
+{
+    apply configuration "SOM.load_balancing" {
+        read_memory "SOM.core_usage" {
+            check(load_percent, threshold: > 75) {
+                perform action "SOM.throttle_non_critical" {
+                    request output(true) @ (SML.io_arbiter) {
+                        set('polling_rate: reduced') as value(SML.ingress_buffer)
+                        record_metric_event(event: "SYSTEM_LOAD_BALANCED")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "SOM.module_sync_verification" {
+        repeat action (infinite) {
+            wait(100 milliseconds) = true {
+                perform action "SOM.query_module_states" {
+                    check state(@osin.SML.status) = (active)
+                    check state(@osin.SMM.status) = (active)
+                    check state(@osin.DMC.status) = (active) {
+                        push "MOSI_COHESION_CONFIRMED" to (@osin.system_log)
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "SOM.emergency_halt" {
+        interrupt "SML.critical_hardware_fail" {
+            transition_state(target: "halted") {
+                push "EMERGENCY_STOP" to (@osin.all_modules)
+                stop process(all_active)
+                save_configuration(path: "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]")
+            }
+        }
+    }
+}
+
+{
+    request output(true) @ (SOM.task_manager) tool use {
+        record_metric_event(event: "QUEUE_REORDER_REQUEST")
+        push process(action) split_work(allocate resource(4>;4<))
+    }
+}
+
+{
+    check trigger execution "operations_manager.kei" {
+        perform action "SOM.init" {
+            perform action "SOM.coordinate_task_memory"
+            perform action "SOM.system_heartbeat"
+            set('som: execution_state') as value("SCHEDULING")
+        }
+    }
+}

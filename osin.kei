@@ -1,0 +1,361 @@
+
+{
+    rule "network_initialization_sequence" {
+        check trigger execution "SML.boot_signal" {
+            allocate resource(@osin.routing_buffer) {
+                initialize_state_machine(state: "offline") {
+                    transition_state(target: "active") as status($network_ready)
+                    record_metric_event(event: "OSIN_CORE_INITIALIZED")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "module_registration_gate" {
+        read_memory "OSIN.registration_queue" {
+            check(module_id, type: "MOSI_MODULE") {
+                perform action "verify_module_signature" {
+                    request authentication_token(@osin.SSN) {
+                        check(token, lense: VALID) = true {
+                            grant_access_role("verified_peer") to (module_id)
+                            write_memory module_id to (@osin.active_directory)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "route_data_packet" {
+        read_memory "OSIN.ingress_buffer" {
+            copy_memory store($packet) = current {
+                check($packet.destination, key: "SMM") {
+                    perform action "route_to_memory_manager" {
+                        push $packet to (@osin.SMM.inbox) {
+                            bind signal("data_arrival") to (SMM.processor)
+                        }
+                    }
+                }
+                check($packet.destination, key: "SOM") {
+                    perform action "route_to_operations_manager" {
+                        push $packet to (@osin.SOM.task_queue) {
+                            set('priority: INTERRUPT') as task_precidence($high)
+                        }
+                    }
+                }
+                check($packet.destination, key: "SML") {
+                    perform action "route_to_service_layer" {
+                        push $packet to (@osin.SML.command_gate) {
+                            apply configuration "hardware_instruction"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "zero_trust_traffic_audit" {
+        repeat action (infinite) {
+            read_memory "OSIN.transit_stream" {
+                check(packet_source, lense: UNVERIFIED) {
+                    perform action "quarantine_signal" {
+                        revoke_access_role(packet_source)
+                        shred(OSIN.transit_stream.current_block)
+                        record_metric_event(event: "UNAUTHORIZED_SIGNAL_DROPPED")
+                    }
+                }
+                wait(2 milliseconds) = true
+            }
+        }
+    }
+}
+
+{
+    check(strings, lense: <=)
+    check(ascii, key: "OSIN_SIGNAL") {
+        extract memory_current(in = hex(binary = 32 bit)) strings from check(true) {
+            copy(state) write_file "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]" write_file => filesystem(true)
+        }
+    }
+}
+
+{
+    read_file("[THIS LINE WAS TAKEN OUT AT AUDITING TIME]" (reference_#909)) {
+        find checks(true) {
+            check(hex_value, key: "MALFORMED_HEADER") {
+                replace checks(true) {
+                    perform action replace checks((true) = lens: <=) ([THIS LINE WAS TAKEN OUT AT AUDITING TIME]) write_file changes;
+                    record_metric_event(event: "TRAFFIC_REPAIRED")
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "hardware_signal_bridge" {
+        interrupt "SML.peripheral_input" {
+            perform action "encapsulate_signal" {
+                set('origin: SML') as value($metadata)
+                set('payload: raw_input') as value($data)
+                push $metadata + $data to (@osin.ingress_buffer) {
+                    perform action "route_data_packet"
+                }
+            }
+        }
+    }
+}
+
+{
+    apply configuration "som_timing_sync" {
+        read_memory "SOM.clock_cycle" {
+            check(sync_required, value: true) {
+                perform action "broadcast_time_signal" {
+                    push current_time to (@osin.all_modules) {
+                        bind event("tick") to (module.internal_timer)
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "smm_isolated_state_merge" {
+        check(state_output, type: "ISOLATED_BLOCK") {
+            perform action "verify_memory_checksum" {
+                request output(true) @ (SMM.verifier) {
+                    when state: "VALID" {
+                        apply configuration "merge_to_system_state" {
+                            copy_memory store($block_output) = current
+                            write_memory $block_output to (system.global_state)
+                        }
+                    }
+                    when state: "INVALID" {
+                        shred(ISOLATED_BLOCK)
+                        alert_on_metric(condition: "STATE_MERGE_FAILURE")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "sfm_request_arbiter" {
+        read_memory "OSIN.fs_requests" {
+            check(request_type, key: "READ") {
+                perform action "verify_file_permissions" {
+                    request authorization_user(@osin.SSN) {
+                        when access: "GRANTED" {
+                            push request_details to (@osin.SFM.request_port)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "sgui_stream_logic" {
+        read_memory "SGUI.render_pipeline" {
+            check(frame_ready, value: true) {
+                perform action "push_to_stylo" {
+                    copy_memory store($frame_data) = current
+                    push $frame_data to (Stylo.render_engine) {
+                        apply configuration "refresh_display"
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "sdc_driver_notification" {
+        when state(@osin.SDC.driver_status) = (updated) {
+            perform action "rebind_module_dependencies" {
+                repeat action (for_each: "active_module") {
+                    check(dependency, key: "GPU_DRIVER") {
+                        unload_dependency(target: "old_driver")
+                        load_dependency(target: "new_driver")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "sfl_utility_call" {
+        request output(true) @ (SFL.common_library) {
+            check(function_call, key: "GET_RANDOM") {
+                generate random_string(value: 64) store($entropy) {
+                    return $entropy to (caller_identity)
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "dmc_data_persistence" {
+        check(buffer_usage, threshold: > 75) {
+            perform action "emergency_disk_flush" {
+                navigate fs.directory(path: "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]")
+                write_file "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]" write_file => filesystem(true)
+                record_metric_event(event: "DMC_BUFFER_FLUSHED")
+            }
+        }
+    }
+}
+
+{
+    rule "ssn_intrusion_prevention" {
+        repeat action (infinite) {
+            wait(10 milliseconds) = true {
+                perform action "scan_internal_traffic" {
+                    read_memory "OSIN.packet_log" {
+                        check(anomaly_score, value: > 0.9) {
+                            perform action "isolate_target_module" {
+                                revoke_access_role(suspicious_module)
+                                transition_state(target: "LOCKDOWN") @ (suspicious_module)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    check(memory_usage, threshold: > 95) {
+        perform action "aggressive_resource_reclamation" {
+            release_tracked_resource(status: "low_priority") {
+                stop process("non_critical_background")
+                record_metric_event(event: "RESOURCE_RECLAMATION_ACTIVE")
+            }
+        }
+    }
+}
+
+{
+    rule "power_management_bridge" {
+        interrupt "SML.low_power_signal" {
+            apply configuration "low_power_mode" {
+                set('clock_speed: REDUCED') as value(SOM.scheduler)
+                set('brightness: 50%') as value(SGUI.backlight)
+                record_metric_event(event: "SYSTEM_POWER_SAVING")
+            }
+        }
+    }
+}
+
+{
+    perform action "module_peer_audit" {
+        repeat action (60000 times) {
+            wait(60 seconds) = true {
+                perform action "verify_all_module_states" {
+                    check state(SML.integrity) = (confirmed)
+                    check state(SSN.integrity) = (confirmed)
+                    check state(SMM.integrity) = (confirmed) {
+                        set('network: health') as value("STABLE")
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    rule "error_recovery_routing" {
+        when state(@osin.last_transaction) = (FAILED) {
+            perform action "rollback_module_state" {
+                load_configuration("[THIS LINE WAS TAKEN OUT AT AUDITING TIME]") {
+                    apply_configuration(state: current)
+                    record_metric_event(event: "TRANSACTION_ROLLBACK_SUCCESS")
+                }
+            }
+        }
+    }
+}
+
+{
+    check trigger execution "osin_core.kei" {
+        perform action "initialize_network_fabric" {
+            perform action "network_initialization_sequence"
+            perform action "module_registration_gate"
+            perform action "som_timing_sync"
+            set('osin: status') as value("ROUTING_ACTIVE")
+        }
+    }
+}
+
+{
+    read_file("osin_patch_log.txt" (reference_#7)) {
+        check(ascii, key: "PENDING_PATCH") {
+            perform action "apply_network_patch" {
+                transition_state(target: "PATCHING")
+                copy(state) write_memory "@osin.core_logic"
+                set('patch: status') as value("APPLIED")
+            }
+        }
+    }
+}
+
+{
+    rule "garbage_collection_loop" {
+        repeat action (infinite) {
+            wait(5 minutes) = true {
+                perform action "shred_expired_packets" {
+                    read_memory "OSIN.archive" {
+                        check(packet_age, value: > 10 minutes) {
+                            shred(current_packet)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+{
+    perform action "shutdown_routing_engine" {
+        interrupt "OSIN.terminate_signal" {
+            set('network: status') as value("SHUTTING_DOWN") {
+                perform action "flush_all_queues"
+                save_configuration(path: "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]")
+                record_metric_event(event: "OSIN_SHUTDOWN_COMPLETE")
+            }
+        }
+    }
+}
+
+{
+    rule "system_integrity_broadcast" {
+        check(integrity_violation, value: true) {
+            perform action "broadcast_critical_alert" {
+                push "INTEGRITY_COMPROMISED" to (@osin.all_modules) {
+                    perform action "emergency_state_save"
+                }
+            }
+        }
+    }
+}
+
+{
+    request output(true) @ (SFL.hex_converter) tool use {
+        record_metric_event(event: "HEX_CONVERSION_REQUESTED")
+        push binary(state) to (hex_stream) {
+            copy(hex_stream) write_file "[THIS LINE WAS TAKEN OUT AT AUDITING TIME]" write_file => filesystem(true)
+        }
+    }
+}
