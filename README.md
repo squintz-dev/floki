@@ -4,3 +4,4 @@ Floki OS is a non-POSIX operating system built on the Modular Operating System I
 
 This repository does not contain the full source code of Floki OS for security and legal reasons. It intentionally provides only limited, non-enforcing components intended to demonstrate the MOSI (Modular Operating System Internals) architecture, design philosophy, and development model. The code in this file is intentionally readable. 
 
+This repo might, in the future, host the actual source code of the entire OS. 
